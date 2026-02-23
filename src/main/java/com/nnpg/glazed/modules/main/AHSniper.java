@@ -1193,9 +1193,10 @@ public class AHSniper extends Module {
             
             if (itemSlot != -1) {
                 // Swap item to main hand
-                int handSlot = this.mc.player.getInventory().getSelectedSlot();
+                int handSlot = this.mc.player.getInventory().selectedSlot;
                 if (itemSlot != handSlot && itemSlot < 9) {
-                    this.mc.player.getInventory().setSelectedSlot(itemSlot);
+                    // Item is in hotbar, just select it
+                    this.mc.player.getInventory().selectedSlot = itemSlot;
                 } else if (itemSlot >= 9) {
                     // Item is in inventory, swap with current hotbar slot
                     this.mc.interactionManager.clickSlot(0, itemSlot, handSlot, SlotActionType.SWAP, this.mc.player);
