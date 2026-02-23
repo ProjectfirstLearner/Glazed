@@ -26,8 +26,7 @@ import meteordevelopment.meteorclient.systems.modules.misc.AutoReconnect;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import net.minecraft.enchantment.Enchantments;
-import net.minecraft.registry.tag.ItemTags;
-import net.minecraft.text.Text;
+import net.minecraft.item.PickaxeItem;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -120,27 +119,11 @@ public class SpawnerProtect extends Module {
             .sliderMax(10000)
             .build());
 
-    private final Setting<Integer> spawnerTimeout = sgGeneral.add(new IntSetting.Builder()
-            .name("spawner-timeout-ms")
-            .description("Time in milliseconds before skipping a spawner that can't be mined")
-            .defaultValue(4000)
-            .min(4000)
-            .max(30000)
-            .sliderMax(30000)
-            .build());
-
     private final Setting<Boolean> depositToEChest = sgGeneral.add(new BoolSetting.Builder()
             .name("deposit-to-echest")
             .description("Deposit spawners into ender chest after mining.")
             .defaultValue(true)
             .build());
-
-    private final Setting<Boolean> depositToEChest = sgGeneral.add(new BoolSetting.Builder()
-            .name("deposit-to-echest")
-            .description("Deposit spawners into ender chest after mining.")
-            .defaultValue(true)
-            .build()
-    );
 
     private final Setting<Boolean> enableWhitelist = sgWhitelist.add(new BoolSetting.Builder()
             .name("enable-whitelist")
@@ -190,8 +173,6 @@ public class SpawnerProtect extends Module {
 
     private boolean sneaking = false;
     private BlockPos currentTarget = null;
-    private long noSpawnerStartTime = -1;
-    private long currentTargetStartTime = -1;
 
     private BlockPos targetChest = null;
     private int chestOpenAttempts = 0;
@@ -207,7 +188,7 @@ public class SpawnerProtect extends Module {
     private boolean rotating = false;
     private final float ROTATION_SPEED = 8.0f;
     private long respawnWaitStart = -1;
-    private final Set<BlockPos> invalidSpawners = new HashSet<>();
+
     public SpawnerProtect() {
         super(GlazedAddon.CATEGORY, "spawner-protect",
                 "Breaks spawners and puts them in your inv when a player is detected");
@@ -243,14 +224,10 @@ public class SpawnerProtect extends Module {
         lastProcessedSlot = -1;
         sneaking = false;
         currentTarget = null;
-        noSpawnerStartTime = -1;
-        currentTargetStartTime = -1;
         targetChest = null;
         chestOpenAttempts = 0;
         emergencyDisconnect = false;
         emergencyReason = "";
-        invalidSpawners.clear();
-        rotating = false;
     }
 
     private void configureLegitMining() {
@@ -383,7 +360,7 @@ public class SpawnerProtect extends Module {
             if (player == mc.player || player == null || !(player instanceof AbstractClientPlayerEntity))
                 continue;
 
-            String playerName = player.getName().getString();
+            String playerName = player.getGameProfile().getName();
 
             if (isPlayerWhitelisted(playerName)) {
                 continue;
@@ -400,7 +377,7 @@ public class SpawnerProtect extends Module {
 
                 toggle();
                 if (mc.world != null) {
-                    mc.world.disconnect(Text.literal(""));
+                    mc.world.disconnect();
                 }
 
                 detectedPlayer = playerName;
@@ -425,11 +402,11 @@ public class SpawnerProtect extends Module {
             if (player == mc.player || player == null || !(player instanceof AbstractClientPlayerEntity))
                 continue;
 
-            double distance = mc.player.distanceTo(player);
+            double distance = mc.player.getPos().distanceTo(player.getPos());
             if (distance < minDetectionRange.get() || distance > maxDetectionRange.get())
                 continue;
 
-            String playerName = player.getName().getString();
+            String playerName = player.getGameProfile().getName();
 
             if (isPlayerWhitelisted(playerName)) {
                 continue;
@@ -469,7 +446,7 @@ public class SpawnerProtect extends Module {
 
     private FindItemResult findSilkTouchPickaxe() {
         return InvUtils.find(stack -> {
-            if (!stack.isIn(ItemTags.PICKAXES))
+            if (!(stack.getItem() instanceof PickaxeItem))
                 return false;
 
             var enchantments = stack.getEnchantments();
@@ -484,160 +461,90 @@ public class SpawnerProtect extends Module {
     private void handleGoingToSpawners() {
         mc.options.sneakKey.setPressed(true);
 
-        // Check if current target is still valid before doing anything else
-        if (currentTarget != null && mc.world.getBlockState(currentTarget).getBlock() != Blocks.SPAWNER) {
-            currentTarget = null;
-            currentTargetStartTime = -1;
-            stopBreaking();
-            noSpawnerStartTime = -1;
-            return;
-        }
-
         if (currentTarget == null) {
             currentTarget = findNearestSpawner();
-
             if (currentTarget == null) {
-                // Start the delay timer when no spawners are found
-                if (noSpawnerStartTime == -1) {
-                    noSpawnerStartTime = System.currentTimeMillis();
-                    if (notifications.get())
-                        info("No spawners found, waiting " + spawnerCheckDelay.get() + "ms to confirm...");
-                    return;
-                }
-                
-                // Check if the delay has passed
-                long elapsed = System.currentTimeMillis() - noSpawnerStartTime;
-                if (elapsed < spawnerCheckDelay.get()) {
-                    // Still waiting, keep checking for new spawners
-                    return;
-                }
-                
-                // Delay passed, confirm no spawners and move to chest
-                invalidSpawners.clear();
                 stopBreaking();
                 currentState = State.GOING_TO_CHEST;
-                noSpawnerStartTime = -1;
-                if (notifications.get())
-                    info("No more spawners in range after delay, moving to ender chest...");
                 return;
             }
-            
-            // Found a new spawner, start the timer
-            currentTargetStartTime = System.currentTimeMillis();
-            if (notifications.get())
-                info("Found spawner at " + currentTarget + ", distance: " + 
-                    String.format("%.1f", Math.sqrt(currentTarget.getSquaredDistance(mc.player.getX(), mc.player.getY(), mc.player.getZ()))));
-        }
-        
-        // Reset the no-spawner timer when we find a spawner
-        noSpawnerStartTime = -1;
-
-        // Check if we've been trying to mine this spawner for too long
-        if (currentTargetStartTime != -1) {
-            long timeTrying = System.currentTimeMillis() - currentTargetStartTime;
-            if (timeTrying > spawnerTimeout.get()) {
-                if (notifications.get())
-                    info("Timeout mining spawner at " + currentTarget + " after " + spawnerTimeout.get() + "ms, skipping...");
-                invalidSpawners.add(currentTarget);
-                currentTarget = null;
-                currentTargetStartTime = -1;
-                stopBreaking();
-                return;
-            }
+            respawnWaitStart = -1;
         }
 
         Direction side = getExposedFaceSide(currentTarget);
-        
-        // Start rotating towards the spawner
         lookAtBlock(currentTarget, side);
 
-        // Mine if we're looking at the spawner
-        if (mc.crosshairTarget instanceof BlockHitResult hit
-                && hit.getBlockPos().equals(currentTarget)) {
-            
+        boolean isSpawner = mc.world.getBlockState(currentTarget).getBlock() == Blocks.SPAWNER;
+
+        if (isSpawner) {
+            respawnWaitStart = -1;
+
             FindItemResult pickaxe = findSilkTouchPickaxe();
-            if (!pickaxe.found()) {
+            if (pickaxe.found()) {
+                InvUtils.swap(pickaxe.slot(), true);
+                mc.options.attackKey.setPressed(true);
+                Direction mineSide = getExposedFaceSide(currentTarget);
+                mc.interactionManager.updateBlockBreakingProgress(currentTarget, mineSide);
+            } else {
+                if (notifications.get())
+                    error("No Silk Touch pickaxe found! Stopping sequence.");
                 stopBreaking();
                 currentState = State.GOING_TO_CHEST;
-                if (notifications.get())
-                    info("No silk touch pickaxe found, moving to ender chest...");
-                return;
             }
-
-            InvUtils.swap(pickaxe.slot(), true);
-
-            mc.options.attackKey.setPressed(true);
-            mc.interactionManager.updateBlockBreakingProgress(currentTarget, hit.getSide());
+            return;
         }
-        // Don't immediately mark as invalid - let the timeout handle it
+
+        if (respawnWaitStart == -1) {
+            respawnWaitStart = System.currentTimeMillis();
+        }
+
+        long elapsed = System.currentTimeMillis() - respawnWaitStart;
+
+        if (elapsed < spawnerCheckDelay.get()) {
+            mc.options.attackKey.setPressed(true);
+            return;
+        }
+
+        BlockPos newTarget = findNearestSpawner();
+
+        if (newTarget != null) {
+            currentTarget = newTarget;
+            respawnWaitStart = -1;
+        } else {
+            stopBreaking();
+            currentTarget = null;
+            respawnWaitStart = -1;
+            currentState = State.GOING_TO_CHEST;
+        }
     }
 
     private BlockPos findNearestSpawner() {
         BlockPos playerPos = mc.player.getBlockPos();
-        BlockPos nearest = null;
+        BlockPos nearestSpawner = null;
         double nearestDistance = Double.MAX_VALUE;
-        
-        // Use spawnerRange setting for distance check (squared for efficiency)
-        double maxDistanceSq = spawnerRange.get() * spawnerRange.get();
 
         for (BlockPos pos : BlockPos.iterate(
                 playerPos.add(-spawnerRange.get(), -spawnerRange.get(), -spawnerRange.get()),
                 playerPos.add(spawnerRange.get(), spawnerRange.get(), spawnerRange.get()))) {
 
-            if (mc.world.getBlockState(pos).getBlock() != Blocks.SPAWNER) continue;
-            if (invalidSpawners.contains(pos)) continue;
-
-            double distanceSq = pos.getSquaredDistance(mc.player.getX(), mc.player.getY(), mc.player.getZ());
-            if (distanceSq > maxDistanceSq) continue;
-
-            if (distanceSq < nearestDistance) {
-                nearestDistance = distanceSq;
-                nearest = pos.toImmutable();
+            if (mc.world.getBlockState(pos).getBlock() == Blocks.SPAWNER) {
+                double distance = pos.getSquaredDistance(mc.player.getPos());
+                if (distance < nearestDistance) {
+                    nearestDistance = distance;
+                    nearestSpawner = pos.toImmutable();
+                }
             }
         }
 
-        return nearest;
+        if (nearestSpawner != null) {
+            if (notifications.get())
+                info("Found spawner at " + nearestSpawner + " (distance: "
+                        + String.format("%.2f", Math.sqrt(nearestDistance)) + ")");
+        }
+
+        return nearestSpawner;
     }
-    private boolean hasLineOfSight(BlockPos pos, Direction side) {
-        Vec3d eyePos = mc.player.getEyePos();
-        Vec3d targetPos = Vec3d.ofCenter(pos).add(Vec3d.of(side.getVector()).multiply(0.5));
 
-        // Use COLLIDER shape type which is more lenient for mining checks
-        BlockHitResult result = mc.world.raycast(new net.minecraft.world.RaycastContext(
-                eyePos,
-                targetPos,
-                net.minecraft.world.RaycastContext.ShapeType.COLLIDER,
-                net.minecraft.world.RaycastContext.FluidHandling.NONE,
-                mc.player
-        ));
-
-        if (result == null) return true; // No hit means clear path
-
-        // If we hit the spawner itself, we have line of sight
-        if (result.getType() == net.minecraft.util.hit.HitResult.Type.BLOCK
-                && result.getBlockPos().equals(pos)) {
-            return true;
-        }
-        
-        // If we hit a block that is air or non-solid, allow it
-        if (result.getType() == net.minecraft.util.hit.HitResult.Type.BLOCK) {
-            BlockPos hitPos = result.getBlockPos();
-            // Allow if we hit air or pass-through blocks
-            if (mc.world.getBlockState(hitPos).isAir()) {
-                return true;
-            }
-            // Allow if we hit a non-full block (like tall grass, water, etc.)
-            if (!mc.world.getBlockState(hitPos).isFullCube(mc.world, hitPos)) {
-                return true;
-            }
-            // Special case: if the spawner is directly below us, allow mining
-            if (hitPos.equals(mc.player.getBlockPos()) || hitPos.equals(mc.player.getBlockPos().down())) {
-                return true;
-            }
-        }
-
-        return false;
-    }
     private void lookAtBlock(BlockPos pos) {
         lookAtBlock(pos, Direction.UP);
     }
@@ -653,13 +560,6 @@ public class SpawnerProtect extends Module {
     }
 
     private Direction getExposedFaceSide(BlockPos pos) {
-        // Check if player is standing directly on this spawner
-        BlockPos playerBlockPos = mc.player.getBlockPos();
-        if (pos.equals(playerBlockPos.down())) {
-            // Player is standing on the spawner, try to find any exposed side
-            // or return DOWN if we need to mine from below (unlikely but possible)
-        }
-        
         for (Direction side : Direction.values()) {
             BlockPos neighbor = pos.offset(side);
             if (mc.world.getBlockState(neighbor).isAir()
@@ -667,7 +567,6 @@ public class SpawnerProtect extends Module {
                 return side;
             }
         }
-
         return Direction.UP;
     }
 
@@ -678,7 +577,8 @@ public class SpawnerProtect extends Module {
     private void handleGoingToChest() {
         if (!depositToEChest.get()) {
             currentState = State.DISCONNECTING;
-            if (notifications.get()) info("Deposit to ender chest disabled, disconnecting...");
+            if (notifications.get())
+                info("Deposit to ender chest disabled, disconnecting...");
             return;
         }
 
@@ -720,7 +620,7 @@ public class SpawnerProtect extends Module {
                 playerPos.add(16, 8, 16))) {
 
             if (mc.world.getBlockState(pos).getBlock() == Blocks.ENDER_CHEST) {
-                double distance = pos.getSquaredDistance(mc.player.getX(), mc.player.getY(), mc.player.getZ());
+                double distance = pos.getSquaredDistance(mc.player.getPos());
                 if (distance < nearestDistance) {
                     nearestDistance = distance;
                     nearestChest = pos.toImmutable();
@@ -732,7 +632,7 @@ public class SpawnerProtect extends Module {
     }
 
     private void moveTowardsBlock(BlockPos target) {
-        Vec3d playerPos = new Vec3d(mc.player.getX(), mc.player.getY(), mc.player.getZ());
+        Vec3d playerPos = mc.player.getPos();
         Vec3d targetPos = Vec3d.ofCenter(target);
         Vec3d direction = targetPos.subtract(playerPos).normalize();
 
@@ -796,11 +696,11 @@ public class SpawnerProtect extends Module {
     private void handleDepositingItems() {
         if (!depositToEChest.get()) {
             currentState = State.DISCONNECTING;
-            if (notifications.get()) info("Deposit to ender chest disabled, skipping deposit.");
+            if (notifications.get())
+                info("Deposit to ender chest disabled, skipping deposit.");
             return;
         }
 
-        if (sneaking) setSneaking(false);
         mc.options.sneakKey.setPressed(false);
 
         if (mc.player.currentScreenHandler instanceof GenericContainerScreenHandler) {
@@ -849,7 +749,7 @@ public class SpawnerProtect extends Module {
     private boolean hasItemsToDeposit() {
         for (int i = 0; i < 36; i++) {
             ItemStack stack = mc.player.getInventory().getStack(i);
-            if (!stack.isEmpty() && stack.getItem() == Items.SPAWNER) {
+            if (!stack.isEmpty() && !isVitalItem(stack)) {
                 return true;
             }
         }
@@ -943,7 +843,7 @@ public class SpawnerProtect extends Module {
         }
 
         if (mc.world != null) {
-            mc.world.disconnect(Text.literal(""));
+            mc.world.disconnect();
         }
 
         if (notifications.get())
