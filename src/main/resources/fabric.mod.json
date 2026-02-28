@@ -19,9 +19,9 @@
     "meteor": [
       "com.nnpg.glazed.GlazedAddon"
     ],
-  "mixinsquared": [
-    "com.nnpg.glazed.mixins.MeteorMixinCanceller"
-  ]
+    "mixinsquared": [
+      "com.nnpg.glazed.mixin.MeteorMixinCanceller"
+    ]
   },
   "mixins": [
     "mixins.json"
