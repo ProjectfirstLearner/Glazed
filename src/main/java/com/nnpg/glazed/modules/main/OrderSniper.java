@@ -15,7 +15,17 @@ import net.minecraft.screen.ScreenHandler;
 import net.minecraft.screen.slot.Slot;
 import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.text.Text;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.block.entity.BlockEntity;
+import net.minecraft.block.entity.ChestBlockEntity;
+import net.minecraft.block.entity.ShulkerBoxBlockEntity;
+import net.minecraft.block.Blocks;
+import net.minecraft.util.Hand;
+import net.minecraft.util.hit.BlockHitResult;
+import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.Vec3d;
 import java.util.List;
+import java.util.ArrayList;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -25,7 +35,7 @@ public class OrderSniper extends Module {
     private enum Stage {
         NONE, REFRESH, OPEN_ORDERS, WAIT_ORDERS_GUI, SELECT_ORDER,
         WAIT_DEPOSIT_GUI, TRANSFER_ITEMS, WAIT_CONFIRM_GUI, CONFIRM_SALE,
-        FINAL_EXIT, CYCLE_PAUSE
+        FINAL_EXIT, CYCLE_PAUSE, SEARCH_CHESTS, OPEN_CHEST, LOOT_CHEST, CLOSE_CHEST
     }
 
     private Stage stage = Stage.NONE;
@@ -34,6 +44,9 @@ public class OrderSniper extends Module {
     private long lastTransferTime = 0;
     private int ticksSinceStageStart = 0;
     private int savedSyncId = -1;
+    private List<BlockPos> nearbyChests = new ArrayList<>();
+    private int currentChestIndex = 0;
+    private BlockPos currentChestPos = null;
 
     // Settings
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
@@ -106,6 +119,22 @@ public class OrderSniper extends Module {
         .name("blacklisted-players")
         .description("Players whose orders will be ignored.")
         .defaultValue(List.of())
+        .build());
+
+    private final Setting<Boolean> autoLootChests = sgGeneral.add(new BoolSetting.Builder()
+        .name("auto-loot-chests")
+        .description("Automatically search and loot nearby chests when inventory is empty.")
+        .defaultValue(true)
+        .build());
+
+    private final Setting<Integer> chestSearchRadius = sgGeneral.add(new IntSetting.Builder()
+        .name("chest-search-radius")
+        .description("Radius to search for chests (in blocks).")
+        .defaultValue(10)
+        .min(3)
+        .max(20)
+        .sliderMax(20)
+        .visible(() -> autoLootChests.get())
         .build());
 
     public OrderSniper() {
@@ -236,7 +265,7 @@ public class OrderSniper extends Module {
                     
                     // If no valid orders found after reasonable time, auto-disable
                     if (!foundValidOrder && now - stageStart > 1000) {
-                        error("No more orders from " + playerName.get() + " - auto-disabling");
+                        ChatUtils.error("No more orders from " + playerName.get() + " - auto-disabling");
                         if (mc.currentScreen != null) mc.player.closeHandledScreen();
                         toggle(); // Auto-disable the module
                         return;
@@ -300,14 +329,26 @@ public class OrderSniper extends Module {
                     }
                 }
 
+                // Transfer items from player inventory to order chest
                 for (Slot slot : handler.slots) {
                     if (slot.inventory == mc.player.getInventory()) {
                         ItemStack stack = slot.getStack();
                         if (!stack.isEmpty()) {
-                            if (stack.isOf(targetItem.get()) || (!hasNormalItems && shulkerSupport.get() && isShulker(stack) && shulkerContainsTarget(stack))) {
-                                mc.interactionManager.clickSlot(handler.syncId, slot.id, 0, SlotActionType.PICKUP, mc.player);
-                                mc.interactionManager.clickSlot(handler.syncId, slot.id, 0, SlotActionType.PICKUP_ALL, mc.player);
+                            boolean shouldTransfer = false;
+                            
+                            // Transfer target items
+                            if (stack.isOf(targetItem.get())) {
+                                shouldTransfer = true;
+                            }
+                            // Transfer shulkers with target items (only if no normal items available)
+                            else if (!hasNormalItems && shulkerSupport.get() && isShulker(stack) && shulkerContainsTarget(stack)) {
+                                shouldTransfer = true;
+                            }
+                            
+                            if (shouldTransfer) {
                                 mc.interactionManager.clickSlot(handler.syncId, slot.id, 0, SlotActionType.QUICK_MOVE, mc.player);
+                                // Add small delay for better reliability
+                                lastTransferTime = now;
                             }
                         }
                     }
@@ -364,6 +405,22 @@ public class OrderSniper extends Module {
                 }
 
                 if (!hasItemsToSell()) {
+                    // Check if auto-loot is enabled and we should search for chests
+                    if (autoLootChests.get()) {
+                        nearbyChests = findNearbyChests();
+                        if (!nearbyChests.isEmpty()) {
+                            currentChestIndex = 0;
+                            if (notifications.get()) {
+                                ChatUtils.info("Found " + nearbyChests.size() + " nearby chest(s), searching for " + 
+                                    targetItem.get().getName().getString() + "...");
+                            }
+                            stage = Stage.SEARCH_CHESTS;
+                            stageStart = now;
+                            ticksSinceStageStart = 0;
+                            return;
+                        }
+                    }
+                    
                     if (notifications.get()) {
                         ChatUtils.info("Completed selling all items!");
                     }
@@ -385,6 +442,115 @@ public class OrderSniper extends Module {
             }
 
             case NONE -> {}
+            
+            case SEARCH_CHESTS -> {
+                if (currentChestIndex >= nearbyChests.size()) {
+                    // No more chests to search or no items found
+                    if (notifications.get()) {
+                        ChatUtils.info("No " + targetItem.get().getName().getString() + 
+                            " found in nearby chests - stopping");
+                    }
+                    toggle();
+                    return;
+                }
+                
+                currentChestPos = nearbyChests.get(currentChestIndex);
+                // Try to open the chest
+                if (mc.interactionManager != null && mc.world != null) {
+                    BlockHitResult hitResult = new BlockHitResult(
+                        Vec3d.ofCenter(currentChestPos), 
+                        Direction.UP, 
+                        currentChestPos, 
+                        false
+                    );
+                    mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, hitResult);
+                    stage = Stage.OPEN_CHEST;
+                    stageStart = now;
+                    ticksSinceStageStart = 0;
+                }
+            }
+            
+            case OPEN_CHEST -> {
+                if (ticksSinceStageStart < Math.max(10, delayTicks.get())) return;
+                
+                if (mc.currentScreen instanceof GenericContainerScreen) {
+                    stage = Stage.LOOT_CHEST;
+                    stageStart = now;
+                    ticksSinceStageStart = 0;
+                } else if (now - stageStart > 2000) {
+                    // Failed to open this chest, try next one
+                    currentChestIndex++;
+                    stage = Stage.SEARCH_CHESTS;
+                    stageStart = now;
+                    ticksSinceStageStart = 0;
+                }
+            }
+            
+            case LOOT_CHEST -> {
+                if (!(mc.currentScreen instanceof GenericContainerScreen screen)) {
+                    // Chest was closed, move to next one
+                    currentChestIndex++;
+                    stage = Stage.SEARCH_CHESTS;
+                    stageStart = now;
+                    ticksSinceStageStart = 0;
+                    return;
+                }
+                
+                ScreenHandler handler = screen.getScreenHandler();
+                boolean foundItems = false;
+                
+                // Only look for the specific target item or shulkers containing target items
+                for (Slot slot : handler.slots) {
+                    if (slot.inventory != mc.player.getInventory()) {
+                        ItemStack stack = slot.getStack();
+                        if (!stack.isEmpty()) {
+                            // Only take items that match our target item exactly
+                            if (stack.isOf(targetItem.get())) {
+                                mc.interactionManager.clickSlot(handler.syncId, slot.id, 0, SlotActionType.QUICK_MOVE, mc.player);
+                                foundItems = true;
+                            }
+                            // Or shulkers that contain our target item (if shulker support enabled)
+                            else if (shulkerSupport.get() && isShulker(stack) && shulkerContainsTarget(stack)) {
+                                mc.interactionManager.clickSlot(handler.syncId, slot.id, 0, SlotActionType.QUICK_MOVE, mc.player);
+                                foundItems = true;
+                            }
+                        }
+                    }
+                }
+                
+                if (foundItems && notifications.get()) {
+                    ChatUtils.info("Found " + targetItem.get().getName().getString() + 
+                        " in chest at " + currentChestPos.toShortString());
+                }
+                
+                stage = Stage.CLOSE_CHEST;
+                stageStart = now;
+                ticksSinceStageStart = 0;
+            }
+            
+            case CLOSE_CHEST -> {
+                if (mc.currentScreen != null) {
+                    mc.player.closeHandledScreen();
+                }
+                
+                if (ticksSinceStageStart < Math.max(5, delayTicks.get())) return;
+                
+                // Check if we now have items to sell
+                if (hasItemsToSell()) {
+                    if (notifications.get()) {
+                        ChatUtils.info("Found " + targetItem.get().getName().getString() + "! Resuming order sniping...");
+                    }
+                    stage = Stage.REFRESH;
+                    stageStart = now;
+                    ticksSinceStageStart = 0;
+                } else {
+                    // Try next chest
+                    currentChestIndex++;
+                    stage = Stage.SEARCH_CHESTS;
+                    stageStart = now;
+                    ticksSinceStageStart = 0;
+                }
+            }
         }
     }
 
@@ -580,5 +746,49 @@ public class OrderSniper extends Module {
             searchTerm,
             targetItem.get().getName().getString(),
             stage.name());
+    }
+
+    // Find nearby chests within the search radius
+    private List<BlockPos> findNearbyChests() {
+        List<BlockPos> chests = new ArrayList<>();
+        if (mc.world == null || mc.player == null) return chests;
+        
+        BlockPos playerPos = mc.player.getBlockPos();
+        int radius = chestSearchRadius.get();
+        
+        // Search in a cubic area around the player
+        for (int x = -radius; x <= radius; x++) {
+            for (int y = -radius; y <= radius; y++) {
+                for (int z = -radius; z <= radius; z++) {
+                    BlockPos pos = playerPos.add(x, y, z);
+                    
+                    // Check if it's a chest or shulker box
+                    if (mc.world.getBlockState(pos).getBlock() == Blocks.CHEST ||
+                        mc.world.getBlockState(pos).getBlock() == Blocks.TRAPPED_CHEST ||
+                        isShulkerBlock(pos)) {
+                        
+                        // Check if we can reach it (simple distance check)
+                        double distance = Math.sqrt(pos.getSquaredDistance(playerPos));
+                        if (distance <= radius && distance <= 6.0) { // Within reach distance
+                            chests.add(pos);
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Sort by distance (closest first)
+        chests.sort((pos1, pos2) -> {
+            double dist1 = pos1.getSquaredDistance(playerPos);
+            double dist2 = pos2.getSquaredDistance(playerPos);
+            return Double.compare(dist1, dist2);
+        });
+        
+        return chests;
+    }
+    
+    private boolean isShulkerBlock(BlockPos pos) {
+        if (mc.world == null) return false;
+        return mc.world.getBlockState(pos).getBlock().getName().getString().toLowerCase().contains("shulker");
     }
 }
