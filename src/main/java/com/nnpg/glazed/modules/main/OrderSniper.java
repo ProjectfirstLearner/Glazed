@@ -39,10 +39,34 @@ public class OrderSniper extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
     private final SettingGroup sgBlacklist = settings.createGroup("Blacklist");
 
+    public enum SnipeMode {
+        HIGHEST_PRICE("Highest Price"),
+        SPECIFIC_PLAYER("Specific Player");
+        
+        private final String title;
+        SnipeMode(String title) { this.title = title; }
+        @Override
+        public String toString() { return title; }
+    }
+
+    private final Setting<SnipeMode> snipeMode = sgGeneral.add(new EnumSetting.Builder<SnipeMode>()
+        .name("snipe-mode")
+        .description("Choose between sniping highest price orders or specific player orders.")
+        .defaultValue(SnipeMode.HIGHEST_PRICE)
+        .build());
+
     private final Setting<String> itemName = sgGeneral.add(new StringSetting.Builder()
         .name("item-name")
         .description("The item name to search for in /orders command.")
         .defaultValue("diamond")
+        .visible(() -> snipeMode.get() == SnipeMode.HIGHEST_PRICE)
+        .build());
+
+    private final Setting<String> playerName = sgGeneral.add(new StringSetting.Builder()
+        .name("player-name")
+        .description("The player name to open orders for (/orders PlayerName).")
+        .defaultValue("")
+        .visible(() -> snipeMode.get() == SnipeMode.SPECIFIC_PLAYER)
         .build());
 
     private final Setting<Item> targetItem = sgGeneral.add(new ItemSetting.Builder()
@@ -95,6 +119,22 @@ public class OrderSniper extends Module {
             toggle();
             return;
         }
+        
+        // Validate settings based on mode
+        if (snipeMode.get() == SnipeMode.HIGHEST_PRICE) {
+            if (itemName.get().trim().isEmpty()) {
+                ChatUtils.error("Item name cannot be empty in Highest Price mode.");
+                toggle();
+                return;
+            }
+        } else {
+            if (playerName.get().trim().isEmpty()) {
+                ChatUtils.error("Player name cannot be empty in Specific Player mode.");
+                toggle();
+                return;
+            }
+        }
+        
         stage = Stage.REFRESH;
         stageStart = System.currentTimeMillis();
         transferIndex = 0;
@@ -136,8 +176,13 @@ public class OrderSniper extends Module {
             }
 
             case OPEN_ORDERS -> {
-                // Use the string setting for the command instead of the formatted item name
-                ChatUtils.sendPlayerMsg("/orders " + itemName.get());
+                String command;
+                if (snipeMode.get() == SnipeMode.HIGHEST_PRICE) {
+                    command = "/orders " + itemName.get();
+                } else {
+                    command = "/orders " + playerName.get();
+                }
+                ChatUtils.sendPlayerMsg(command);
                 stage = Stage.WAIT_ORDERS_GUI;
                 stageStart = now;
                 ticksSinceStageStart = 0;
@@ -158,18 +203,46 @@ public class OrderSniper extends Module {
             case SELECT_ORDER -> {
                 if (!(mc.currentScreen instanceof GenericContainerScreen screen)) return;
                 ScreenHandler handler = screen.getScreenHandler();
-                for (Slot slot : handler.slots) {
-                    ItemStack stack = slot.getStack();
-                    if (!stack.isEmpty() && isMatchingOrder(stack)) {
-                        if (isBlacklisted(getOrderPlayerName(stack))) continue;
-                        savedSyncId = handler.syncId;
-                        mc.interactionManager.clickSlot(handler.syncId, slot.id, 0, SlotActionType.PICKUP, mc.player);
-                        stage = Stage.WAIT_DEPOSIT_GUI;
-                        stageStart = now;
-                        ticksSinceStageStart = 0;
+                
+                if (snipeMode.get() == SnipeMode.HIGHEST_PRICE) {
+                    // Original logic: find highest price order
+                    for (Slot slot : handler.slots) {
+                        ItemStack stack = slot.getStack();
+                        if (!stack.isEmpty() && isMatchingOrder(stack)) {
+                            if (isBlacklisted(getOrderPlayerName(stack))) continue;
+                            savedSyncId = handler.syncId;
+                            mc.interactionManager.clickSlot(handler.syncId, slot.id, 0, SlotActionType.PICKUP, mc.player);
+                            stage = Stage.WAIT_DEPOSIT_GUI;
+                            stageStart = now;
+                            ticksSinceStageStart = 0;
+                            return;
+                        }
+                    }
+                } else {
+                    // New logic: find any valid order from specific player (we're already in their shop)
+                    boolean foundValidOrder = false;
+                    for (Slot slot : handler.slots) {
+                        ItemStack stack = slot.getStack();
+                        if (!stack.isEmpty() && isPlayerOrderMatching(stack)) {
+                            foundValidOrder = true;
+                            savedSyncId = handler.syncId;
+                            mc.interactionManager.clickSlot(handler.syncId, slot.id, 0, SlotActionType.PICKUP, mc.player);
+                            stage = Stage.WAIT_DEPOSIT_GUI;
+                            stageStart = now;
+                            ticksSinceStageStart = 0;
+                            return;
+                        }
+                    }
+                    
+                    // If no valid orders found after reasonable time, auto-disable
+                    if (!foundValidOrder && now - stageStart > 1000) {
+                        error("No more orders from " + playerName.get() + " - auto-disabling");
+                        if (mc.currentScreen != null) mc.player.closeHandledScreen();
+                        toggle(); // Auto-disable the module
                         return;
                     }
                 }
+                
                 if (now - stageStart > 2000) {
                     mc.interactionManager.clickSlot(handler.syncId, 49, 1, SlotActionType.QUICK_MOVE, mc.player);
                     mc.interactionManager.clickSlot(handler.syncId, 49, 1, SlotActionType.QUICK_MOVE, mc.player);
@@ -352,6 +425,14 @@ public class OrderSniper extends Module {
         return price >= min;
     }
 
+    // New method for player-specific order matching
+    private boolean isPlayerOrderMatching(ItemStack stack) {
+        if (!stack.isOf(targetItem.get())) return false;
+        double price = getOrderPrice(stack);
+        double min = parsePrice(minPrice.get());
+        return price >= min;
+    }
+
     private double getOrderPrice(ItemStack stack) {
         List<Text> tooltip = stack.getTooltip(Item.TooltipContext.create(mc.world), mc.player, TooltipType.BASIC);
         return parseTooltipPrice(tooltip);
@@ -492,8 +573,11 @@ public class OrderSniper extends Module {
     @Override
     public String getInfoString() {
         if (!isActive()) return null;
-        return String.format("%s -> %s (Stage: %s)",
-            itemName.get(),
+        String searchTerm = snipeMode.get() == SnipeMode.HIGHEST_PRICE ? itemName.get() : playerName.get();
+        String mode = snipeMode.get() == SnipeMode.HIGHEST_PRICE ? "Price" : "Player";
+        return String.format("%s: %s -> %s (%s)",
+            mode,
+            searchTerm,
             targetItem.get().getName().getString(),
             stage.name());
     }
