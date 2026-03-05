@@ -54,6 +54,51 @@ tasks {
             rename { "${it}_${licenseSuffix}" }
         }
     }
+    register<Task>("copyToPrismLauncher") {
+        dependsOn("remapJar")
+        group = "build"
+        description = "Copies the built JAR to PrismLauncher mods folder"
+
+        val appDataDir = System.getenv("APPDATA")
+        val modsDir = "$appDataDir/PrismLauncher/instances/Glazed/minecraft/mods"
+        val archivesBaseName = base.archivesName.get()
+        val projectVersion = version.toString()
+        val buildLibsDir = layout.buildDirectory.dir("libs").get().asFile
+
+        doLast {
+            val targetDir = File(modsDir)
+            if (!targetDir.exists()) {
+                targetDir.mkdirs()
+                println("Created mods directory: $modsDir")
+            }
+
+            targetDir.listFiles()?.filter { file ->
+                file.name.startsWith(archivesBaseName) && file.name.endsWith(".jar")
+            }?.forEach { file ->
+                file.delete()
+                println("Deleted existing mod: ${file.name}")
+            }
+
+            val jarFileName = "$archivesBaseName-$projectVersion.jar"
+            val sourceFile = File(buildLibsDir, jarFileName)
+
+            if (sourceFile.exists()) {
+                val targetFile = File(targetDir, sourceFile.name)
+                sourceFile.copyTo(targetFile, overwrite = true)
+                println("Copied mod to PrismLauncher: ${targetFile.absolutePath}")
+            } else {
+                println("ERROR: Could not find remapped JAR at: ${sourceFile.absolutePath}")
+                buildLibsDir.listFiles()?.forEach { file ->
+                    if (file.name.endsWith(".jar")) {
+                        println("Available JAR: ${file.name}")
+                    }
+                }
+            }
+        }
+    }
+    build {
+        finalizedBy("copyToPrismLauncher")
+    }
     java {
         sourceCompatibility = JavaVersion.VERSION_21
         targetCompatibility = JavaVersion.VERSION_21
