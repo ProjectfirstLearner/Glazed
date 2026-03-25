@@ -134,16 +134,6 @@ public class LightESP extends Module {
         .build()
     );
 
-    private final Setting<Integer> maxRenderedLights = sgRender.add(new IntSetting.Builder()
-        .name("max-rendered-lights")
-        .description("Maximum amount of light boxes rendered each frame.")
-        .defaultValue(1200)
-        .min(100)
-        .max(5000)
-        .sliderMax(5000)
-        .build()
-    );
-
     private final Setting<Boolean> thermalColors = sgRender.add(new BoolSetting.Builder()
         .name("thermal-colors")
         .description("Use thermal-style colors based on light level.")
@@ -222,48 +212,48 @@ public class LightESP extends Module {
     private void scanChunk(int chunkX, int chunkZ, Map<BlockPos, Integer> cache) {
         int startX = chunkX * 16;
         int startZ = chunkZ * 16;
-        int maxDistSq = maxDistance.get() * maxDistance.get();
-        BlockPos.Mutable pos = new BlockPos.Mutable();
 
         for (int x = 0; x < 16; x++) {
             for (int z = 0; z < 16; z++) {
                 for (int y = minY.get(); y <= maxY.get(); y++) {
-                    pos.set(startX + x, y, startZ + z);
+                    BlockPos pos = new BlockPos(startX + x, y, startZ + z);
 
                     // Distance check
-                    if (distanceLimit.get() && mc.player.squaredDistanceTo(pos.getX(), pos.getY(), pos.getZ()) > maxDistSq) {
-                        continue;
-                    }
-
-                    BlockState state = mc.world.getBlockState(pos);
-                    Block block = state.getBlock();
-
-                    // Fast path: if we only care about source blocks, use luminance directly.
-                    if (onlySourceBlocks.get()) {
-                        int luminance = state.getLuminance();
-                        if (luminance < minLightLevel.get()) continue;
-                        if (!passesFilters(block)) continue;
-                        cache.put(pos.toImmutable(), luminance);
+                    if (distanceLimit.get() && mc.player.squaredDistanceTo(pos.getX(), pos.getY(), pos.getZ()) > maxDistance.get() * maxDistance.get()) {
                         continue;
                     }
 
                     int blockLight = mc.world.getLightLevel(LightType.BLOCK, pos);
-                    if (blockLight < minLightLevel.get()) continue;
-
                     int skyLight = mc.world.getLightLevel(LightType.SKY, pos);
 
                     // Must have sufficient block light and more block light than sky light
                     if (blockLight >= minLightLevel.get() && blockLight > skyLight) {
+                        BlockState state = mc.world.getBlockState(pos);
+                        Block block = state.getBlock();
+
+                        // If only source blocks, check if this is actually emitting light
+                        if (onlySourceBlocks.get()) {
+                            if (!isLightSourceBlock(block, state)) {
+                                continue;
+                            }
+                        }
+
                         // Apply filters
                         if (!passesFilters(block)) {
                             continue;
                         }
 
-                        cache.put(pos.toImmutable(), blockLight);
+                        cache.put(pos, blockLight);
                     }
                 }
             }
         }
+    }
+
+    private boolean isLightSourceBlock(Block block, BlockState state) {
+        // Get the luminance directly from the block
+        int luminance = state.getLuminance();
+        return luminance > 0;
     }
 
     private boolean passesFilters(Block block) {
@@ -319,10 +309,7 @@ public class LightESP extends Module {
     }
 
     private void renderCachedLights(Render3DEvent event) {
-        int rendered = 0;
         for (Map.Entry<BlockPos, Integer> entry : lightCache.entrySet()) {
-            if (rendered >= maxRenderedLights.get()) break;
-
             BlockPos pos = entry.getKey();
             int lightLevel = entry.getValue();
 
@@ -347,7 +334,6 @@ public class LightESP extends Module {
             }
 
             event.renderer.box(pos, sColor, lColor, shapeMode.get(), 0);
-            rendered++;
         }
     }
 
