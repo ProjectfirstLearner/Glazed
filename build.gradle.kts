@@ -1,15 +1,35 @@
 import org.gradle.api.tasks.compile.JavaCompile
-import org.gradle.jvm.toolchain.JavaLanguageVersion
 import java.io.File
 
 plugins {
     id("fabric-loom") version "1.14.1"
 }
 
-val selectedJavaVersion = (findProperty("target_java_version") as String?)
+val selectedMcProfile = (findProperty("minecraft_profile") as String?)
     ?.trim()
-    ?.toIntOrNull()
-    ?: 21
+    .orEmpty()
+    .ifEmpty { "1.21.11" }
+
+fun profileKey(prefix: String): String {
+    val normalizedProfile = selectedMcProfile.replace('.', '_')
+    return "${prefix}_$normalizedProfile"
+}
+
+fun resolveProfileValue(prefix: String, fallbackKey: String): String {
+    val profileValue = (findProperty(profileKey(prefix)) as String?)?.trim()
+    if (!profileValue.isNullOrEmpty()) return profileValue
+
+    val fallbackValue = (findProperty(fallbackKey) as String?)?.trim()
+    if (!fallbackValue.isNullOrEmpty()) return fallbackValue
+
+    error("Missing Gradle property '${profileKey(prefix)}' (or fallback '$fallbackKey').")
+}
+
+val minecraftVersion = resolveProfileValue("minecraft_version", "minecraft_version")
+val yarnMappings = resolveProfileValue("yarn_mappings", "yarn_mappings")
+val loaderVersion = resolveProfileValue("loader_version", "loader_version")
+val baritoneVersion = resolveProfileValue("baritone_version", "baritone_version")
+val modVersion = resolveProfileValue("mod_version", "mod_version")
 
 val copyAfterBuild = when ((findProperty("copy_after_build") as String?)?.trim()?.lowercase()) {
     "false", "0", "no" -> false
@@ -45,7 +65,7 @@ fun resolveOutputDirectories(): List<File> {
 
 base {
     archivesName = properties["archives_base_name"] as String
-    version = properties["mod_version"] as String
+    version = modVersion
     group = properties["maven_group"] as String
 }
 
@@ -68,11 +88,11 @@ repositories {
 }
 
 dependencies {
-    minecraft("com.mojang:minecraft:${properties["minecraft_version"] as String}")
-    mappings("net.fabricmc:yarn:${properties["yarn_mappings"] as String}:v2")
-    modImplementation("net.fabricmc:fabric-loader:${properties["loader_version"] as String}")
-    modImplementation("meteordevelopment:meteor-client:${properties["minecraft_version"] as String}-SNAPSHOT")
-    modImplementation("meteordevelopment:baritone:${properties["baritone_version"] as String}-SNAPSHOT")
+    minecraft("com.mojang:minecraft:$minecraftVersion")
+    mappings("net.fabricmc:yarn:$yarnMappings:v2")
+    modImplementation("net.fabricmc:fabric-loader:$loaderVersion")
+    modImplementation("meteordevelopment:meteor-client:$minecraftVersion-SNAPSHOT")
+    modImplementation("meteordevelopment:baritone:$baritoneVersion-SNAPSHOT")
     implementation("com.google.code.gson:gson:2.10.1")
     include(implementation(annotationProcessor("com.github.bawnorton.mixinsquared:mixinsquared-fabric:0.3.7-beta.1")!!)!!)
 }
@@ -81,7 +101,7 @@ tasks {
     processResources {
         val propertyMap = mapOf(
             "version" to project.version,
-            "mc_version" to project.property("minecraft_version"),
+            "mc_version" to minecraftVersion,
         )
         inputs.properties(propertyMap)
         filteringCharset = "UTF-8"
@@ -160,12 +180,11 @@ tasks {
         finalizedBy("copyBuiltJar")
     }
     java {
-        toolchain.languageVersion.set(JavaLanguageVersion.of(selectedJavaVersion))
-        sourceCompatibility = JavaVersion.toVersion(selectedJavaVersion)
-        targetCompatibility = JavaVersion.toVersion(selectedJavaVersion)
+        sourceCompatibility = JavaVersion.VERSION_21
+        targetCompatibility = JavaVersion.VERSION_21
     }
     withType<JavaCompile> {
         options.encoding = "UTF-8"
-        options.release.set(selectedJavaVersion)
+        options.release.set(21)
     }
 }

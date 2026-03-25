@@ -15,8 +15,10 @@ import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.client.sound.PositionedSoundInstance;
+import net.minecraft.client.sound.SoundInstance;
 import net.minecraft.fluid.FluidState;
 import net.minecraft.item.Items;
+import net.minecraft.sound.SoundEvent;
 import net.minecraft.sound.SoundEvents;
 import net.minecraft.state.property.Properties;
 import net.minecraft.text.Text;
@@ -725,8 +727,8 @@ public class ChunkFinder extends Module {
             }
 
             if (playSound.get()) {
-                mc.getSoundManager().play(PositionedSoundInstance.ui(
-                    SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP, 1.5f));
+                SoundInstance alertSound = createAlertSound(SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP, 1.5f);
+                if (alertSound != null) mc.getSoundManager().play(alertSound);
             }
 
             recentAlerts.offer(now);
@@ -762,12 +764,32 @@ public class ChunkFinder extends Module {
             }
 
             if (playSound.get()) {
-                mc.getSoundManager().play(PositionedSoundInstance.ui(
-                    SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP, 1.5f));
+                SoundInstance alertSound = createAlertSound(SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP, 1.5f);
+                if (alertSound != null) mc.getSoundManager().play(alertSound);
             }
 
             recentAlerts.offer(now);
         });
+    }
+
+    private SoundInstance createAlertSound(SoundEvent soundEvent, float volume) {
+        try {
+            Object result = PositionedSoundInstance.class
+                .getMethod("ui", SoundEvent.class, float.class)
+                .invoke(null, soundEvent, volume);
+            if (result instanceof SoundInstance sound) return sound;
+        } catch (ReflectiveOperationException ignored) {
+        }
+
+        try {
+            Object result = PositionedSoundInstance.class
+                .getMethod("master", SoundEvent.class, float.class)
+                .invoke(null, soundEvent, volume);
+            if (result instanceof SoundInstance sound) return sound;
+        } catch (ReflectiveOperationException ignored) {
+        }
+
+        return null;
     }
 
     private void performCleanup() {
