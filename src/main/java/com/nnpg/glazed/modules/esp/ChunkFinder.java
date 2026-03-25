@@ -505,18 +505,26 @@ public class ChunkFinder extends Module {
     }
 
     private void analyzeBlock(BlockPos blockPos, BlockState state, int worldY, ChunkAnalysis analysis) {
+        if (!isRelevantBlock(state)) return;
+
         SuspiciousBlockType blockType = null;
+        Block block = state.getBlock();
 
         // Count trial chamber blocks
         if (ignoreTrialChambers.get() && isTrialChamberBlock(state)) {
             analysis.trialChamberCount++;
+            return;
         }
 
-        // If ignoreExposed enabled, detect exposure (air or fluid) around the block
-        boolean exposed = false;
-        if (ignoreExposed.get()) {
-            exposed = isExposedToAirOrFluid(blockPos);
-        }
+        boolean needsExposureCheck =
+            (detectDeepslate.get() && isNormalDeepslate(state)) ||
+                (detectRotatedDeepslate.get() && isRotatedDeepslateBlock(state)) ||
+                (detectCobbledDeepslate.get() && block == Blocks.COBBLED_DEEPSLATE) ||
+                (detectEndStone.get() && block == Blocks.END_STONE && mc.world.getRegistryKey() != World.END);
+
+        if (!needsExposureCheck) return;
+
+        boolean exposed = ignoreExposed.get() && isExposedToAirOrFluid(blockPos);
 
         // Detect suspicious blocks
         if (detectDeepslate.get() && isNormalDeepslate(state) && !exposed && !isInLargeDeepslateLine(blockPos, worldY)) {
@@ -859,8 +867,11 @@ public class ChunkFinder extends Module {
 
     private void renderSuspiciousBlocks(Render3DEvent event) {
         int rendered = 0;
+        int inspected = 0;
+        int inspectLimit = Math.max(maxBlocksToRender.get() * 12, 600);
 
         for (Map.Entry<BlockPos, SuspiciousBlock> entry : suspiciousBlocks.entrySet()) {
+            if (inspected++ >= inspectLimit) break;
             if (rendered >= maxBlocksToRender.get()) break;
 
             BlockPos pos = entry.getKey();
