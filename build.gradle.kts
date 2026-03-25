@@ -1,5 +1,46 @@
+import org.gradle.api.tasks.compile.JavaCompile
+import org.gradle.jvm.toolchain.JavaLanguageVersion
+import java.io.File
+
 plugins {
     id("fabric-loom") version "1.14.1"
+}
+
+val selectedJavaVersion = (findProperty("target_java_version") as String?)
+    ?.trim()
+    ?.toIntOrNull()
+    ?: 21
+
+val copyAfterBuild = when ((findProperty("copy_after_build") as String?)?.trim()?.lowercase()) {
+    "false", "0", "no" -> false
+    else -> true
+}
+
+val outputProfile = (findProperty("build_output_profile") as String?)
+    ?.trim()
+    ?.lowercase()
+    ?: "prism"
+
+val rawOutputDirs = (findProperty("build_output_dirs") as String?)
+    ?.trim()
+    .orEmpty()
+
+val prismModsDir = "${System.getenv("APPDATA")}/PrismLauncher/instances/Glazed/minecraft/mods"
+
+fun resolveOutputDirectories(): List<File> {
+    val profileDirs = when (outputProfile) {
+        "none" -> emptyList()
+        "prism" -> listOf(prismModsDir)
+        else -> listOf(outputProfile)
+    }
+
+    val customDirs = rawOutputDirs
+        .split(';', ',')
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+
+    val merged = (profileDirs + customDirs).distinct()
+    return merged.map { File(it) }
 }
 
 base {
@@ -54,57 +95,77 @@ tasks {
             rename { "${it}_${licenseSuffix}" }
         }
     }
-    register<Task>("copyToPrismLauncher") {
+    register<Task>("copyBuiltJar") {
         dependsOn("remapJar")
         group = "build"
-        description = "Copies the built JAR to PrismLauncher mods folder"
+        description = "Copies the built JAR to configured output folder(s)."
+        notCompatibleWithConfigurationCache("Uses dynamic output directory resolution and file operations.")
 
-        val appDataDir = System.getenv("APPDATA")
-        val modsDir = "$appDataDir/PrismLauncher/instances/Glazed/minecraft/mods"
         val archivesBaseName = base.archivesName.get()
         val projectVersion = version.toString()
         val buildLibsDir = layout.buildDirectory.dir("libs").get().asFile
 
         doLast {
-            val targetDir = File(modsDir)
-            if (!targetDir.exists()) {
-                targetDir.mkdirs()
-                println("Created mods directory: $modsDir")
+            if (!copyAfterBuild) {
+                println("Skipping jar copy because copy_after_build=false")
+                return@doLast
             }
 
-            targetDir.listFiles()?.filter { file ->
-                file.name.startsWith(archivesBaseName) && file.name.endsWith(".jar")
-            }?.forEach { file ->
-                file.delete()
-                println("Deleted existing mod: ${file.name}")
+            val outputDirs = resolveOutputDirectories()
+            if (outputDirs.isEmpty()) {
+                println("No output directory selected. Set build_output_profile or build_output_dirs.")
+                return@doLast
             }
 
             val jarFileName = "$archivesBaseName-$projectVersion.jar"
             val sourceFile = File(buildLibsDir, jarFileName)
 
-            if (sourceFile.exists()) {
-                val targetFile = File(targetDir, sourceFile.name)
-                sourceFile.copyTo(targetFile, overwrite = true)
-                println("Copied mod to PrismLauncher: ${targetFile.absolutePath}")
-            } else {
+            if (!sourceFile.exists()) {
                 println("ERROR: Could not find remapped JAR at: ${sourceFile.absolutePath}")
                 buildLibsDir.listFiles()?.forEach { file ->
                     if (file.name.endsWith(".jar")) {
                         println("Available JAR: ${file.name}")
                     }
                 }
+                return@doLast
+            }
+
+            outputDirs.forEach { targetDir ->
+                if (!targetDir.exists()) {
+                    targetDir.mkdirs()
+                    println("Created mods directory: ${targetDir.absolutePath}")
+                }
+
+                targetDir.listFiles()?.filter { file ->
+                    file.name.startsWith(archivesBaseName) && file.name.endsWith(".jar")
+                }?.forEach { file ->
+                    file.delete()
+                    println("Deleted existing mod: ${file.name}")
+                }
+
+                val targetFile = File(targetDir, sourceFile.name)
+                sourceFile.copyTo(targetFile, overwrite = true)
+                println("Copied mod to: ${targetFile.absolutePath}")
             }
         }
     }
+
+    register<Task>("copyToPrismLauncher") {
+        dependsOn("copyBuiltJar")
+        group = "build"
+        description = "Compatibility alias for copyBuiltJar."
+    }
+
     build {
-        finalizedBy("copyToPrismLauncher")
+        finalizedBy("copyBuiltJar")
     }
     java {
-        sourceCompatibility = JavaVersion.VERSION_21
-        targetCompatibility = JavaVersion.VERSION_21
+        toolchain.languageVersion.set(JavaLanguageVersion.of(selectedJavaVersion))
+        sourceCompatibility = JavaVersion.toVersion(selectedJavaVersion)
+        targetCompatibility = JavaVersion.toVersion(selectedJavaVersion)
     }
     withType<JavaCompile> {
         options.encoding = "UTF-8"
-        options.release = 21
+        options.release.set(selectedJavaVersion)
     }
 }
