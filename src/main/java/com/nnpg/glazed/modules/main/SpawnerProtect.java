@@ -20,13 +20,13 @@ import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.screen.slot.SlotActionType;
+import net.minecraft.text.Text;
 import net.minecraft.util.Hand;
 import net.minecraft.world.World;
 import meteordevelopment.meteorclient.systems.modules.misc.AutoReconnect;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import net.minecraft.enchantment.Enchantments;
-import net.minecraft.item.PickaxeItem;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -375,7 +375,7 @@ public class SpawnerProtect extends Module {
             if (player == mc.player || player == null || !(player instanceof AbstractClientPlayerEntity))
                 continue;
 
-            String playerName = player.getGameProfile().getName();
+            String playerName = player.getName().getString();
 
             if (isPlayerWhitelisted(playerName)) {
                 continue;
@@ -392,7 +392,7 @@ public class SpawnerProtect extends Module {
 
                 toggle();
                 if (mc.world != null) {
-                    mc.world.disconnect();
+                    mc.world.disconnect(Text.literal("SpawnerProtect emergency disconnect"));
                 }
 
                 detectedPlayer = playerName;
@@ -417,11 +417,11 @@ public class SpawnerProtect extends Module {
             if (player == mc.player || player == null || !(player instanceof AbstractClientPlayerEntity))
                 continue;
 
-            double distance = mc.player.getPos().distanceTo(player.getPos());
+            double distance = mc.player.distanceTo(player);
             if (distance < minDetectionRange.get() || distance > maxDetectionRange.get())
                 continue;
 
-            String playerName = player.getGameProfile().getName();
+            String playerName = player.getName().getString();
 
             if (isPlayerWhitelisted(playerName)) {
                 continue;
@@ -461,7 +461,7 @@ public class SpawnerProtect extends Module {
 
     private FindItemResult findSilkTouchPickaxe() {
         return InvUtils.find(stack -> {
-            if (!(stack.getItem() instanceof PickaxeItem))
+            if (!stack.getItem().toString().toLowerCase().contains("pickaxe"))
                 return false;
 
             var enchantments = stack.getEnchantments();
@@ -518,7 +518,7 @@ public class SpawnerProtect extends Module {
             currentTargetStartTime = System.currentTimeMillis();
             if (notifications.get())
                 info("Found spawner at " + currentTarget + ", distance: " + 
-                    String.format("%.1f", Math.sqrt(currentTarget.getSquaredDistance(mc.player.getPos()))));
+                    String.format("%.1f", Math.sqrt(currentTarget.getSquaredDistance(mc.player.getX(), mc.player.getY(), mc.player.getZ()))));
         }
         
         // Reset the no-spawner timer when we find a spawner
@@ -579,7 +579,7 @@ public class SpawnerProtect extends Module {
             if (mc.world.getBlockState(pos).getBlock() != Blocks.SPAWNER) continue;
             if (invalidSpawners.contains(pos)) continue;
 
-            double distanceSq = pos.getSquaredDistance(mc.player.getPos());
+            double distanceSq = pos.getSquaredDistance(mc.player.getX(), mc.player.getY(), mc.player.getZ());
             if (distanceSq > maxDistanceSq) continue;
 
             if (distanceSq < nearestDistance) {
@@ -713,7 +713,7 @@ public class SpawnerProtect extends Module {
                 playerPos.add(16, 8, 16))) {
 
             if (mc.world.getBlockState(pos).getBlock() == Blocks.ENDER_CHEST) {
-                double distance = pos.getSquaredDistance(mc.player.getPos());
+                double distance = pos.getSquaredDistance(mc.player.getX(), mc.player.getY(), mc.player.getZ());
                 if (distance < nearestDistance) {
                     nearestDistance = distance;
                     nearestChest = pos.toImmutable();
@@ -725,7 +725,7 @@ public class SpawnerProtect extends Module {
     }
 
     private void moveTowardsBlock(BlockPos target) {
-        Vec3d playerPos = mc.player.getPos();
+        Vec3d playerPos = new Vec3d(mc.player.getX(), mc.player.getY(), mc.player.getZ());
         Vec3d targetPos = Vec3d.ofCenter(target);
         Vec3d direction = targetPos.subtract(playerPos).normalize();
 
@@ -936,7 +936,7 @@ public class SpawnerProtect extends Module {
         }
 
         if (mc.world != null) {
-            mc.world.disconnect();
+            mc.world.disconnect(Text.literal("SpawnerProtect disconnect"));
         }
 
         if (notifications.get())

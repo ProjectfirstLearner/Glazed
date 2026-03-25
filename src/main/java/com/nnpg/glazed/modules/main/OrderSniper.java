@@ -322,7 +322,8 @@ public class OrderSniper extends Module {
 
                 boolean hasNormalItems = false;
                 boolean hasShulkers = false;
-                for (ItemStack stack : mc.player.getInventory().main) {
+                for (int i = 0; i < 36; i++) {
+                    ItemStack stack = mc.player.getInventory().getStack(i);
                     if (!stack.isEmpty()) {
                         if (stack.isOf(targetItem.get())) hasNormalItems = true;
                         else if (shulkerSupport.get() && isShulker(stack) && shulkerContainsTarget(stack)) hasShulkers = true;
@@ -355,7 +356,8 @@ public class OrderSniper extends Module {
                 }
 
                 boolean stillHasItems = false;
-                for (ItemStack stack : mc.player.getInventory().main) {
+                for (int i = 0; i < 36; i++) {
+                    ItemStack stack = mc.player.getInventory().getStack(i);
                     if (!stack.isEmpty() && (stack.isOf(targetItem.get()) || (shulkerSupport.get() && isShulker(stack) && shulkerContainsTarget(stack)))) {
                         stillHasItems = true;
                         break;
