@@ -13,6 +13,7 @@ import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.ChunkPos;
+import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.LightType;
 import net.minecraft.world.chunk.Chunk;
 import net.minecraft.world.chunk.ChunkStatus;
@@ -166,6 +167,35 @@ public class LightESP extends Module {
         .build()
     );
 
+    private final Setting<Boolean> adaptiveMovementBoost = sgPerformance.add(new BoolSetting.Builder()
+        .name("adaptive-movement-boost")
+        .description("Boost scanning and prioritize nearby chunks while moving fast.")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Double> movementBoostThreshold = sgPerformance.add(new DoubleSetting.Builder()
+        .name("boost-threshold-blocks-tick")
+        .description("Movement speed threshold to trigger adaptive scan boost.")
+        .defaultValue(0.45)
+        .min(0.1)
+        .max(2.0)
+        .sliderMax(2.0)
+        .visible(adaptiveMovementBoost::get)
+        .build()
+    );
+
+    private final Setting<Integer> movementBoostChunksPerTick = sgPerformance.add(new IntSetting.Builder()
+        .name("boost-chunks-per-tick")
+        .description("Chunks scanned per tick while movement boost is active.")
+        .defaultValue(6)
+        .min(2)
+        .max(24)
+        .sliderMax(24)
+        .visible(adaptiveMovementBoost::get)
+        .build()
+    );
+
     private final Setting<Boolean> thermalColors = sgRender.add(new BoolSetting.Builder()
         .name("thermal-colors")
         .description("Use thermal-style colors based on light level.")
@@ -195,6 +225,9 @@ public class LightESP extends Module {
     private int scanIndex = 0;
     private boolean scanInProgress = false;
     private long lastScanTime = 0;
+    private ChunkPos lastPlayerChunkPos = null;
+    private Vec3d lastPlayerPos = null;
+    private double lastMovementSpeed = 0.0;
 
     public LightESP() {
         super(GlazedAddon.esp, "light-esp", "Improved light source detection");
@@ -208,6 +241,9 @@ public class LightESP extends Module {
         scanIndex = 0;
         scanInProgress = false;
         lastScanTime = 0;
+        lastPlayerChunkPos = null;
+        lastPlayerPos = null;
+        lastMovementSpeed = 0.0;
     }
 
     @Override
@@ -216,11 +252,30 @@ public class LightESP extends Module {
         scanQueue.clear();
         stagingCache.clear();
         scanInProgress = false;
+        lastPlayerChunkPos = null;
+        lastPlayerPos = null;
+        lastMovementSpeed = 0.0;
     }
 
     @EventHandler
     private void onTick(TickEvent.Pre event) {
         if (mc.world == null || mc.player == null) return;
+
+        ChunkPos currentChunkPos = mc.player.getChunkPos();
+        updateMovementSpeed();
+
+        if (lastPlayerChunkPos == null) {
+            lastPlayerChunkPos = currentChunkPos;
+            prepareScan();
+            lastScanTime = System.currentTimeMillis();
+        }
+
+        if (lastPlayerChunkPos != null && (lastPlayerChunkPos.x != currentChunkPos.x || lastPlayerChunkPos.z != currentChunkPos.z)) {
+            // If we moved to another chunk, rebuild queue immediately so new surroundings are prioritized.
+            prepareScan();
+            lastScanTime = System.currentTimeMillis();
+            lastPlayerChunkPos = currentChunkPos;
+        }
 
         long currentTime = System.currentTimeMillis();
         if (!scanInProgress && currentTime - lastScanTime >= scanIntervalMs.get()) {
@@ -254,12 +309,24 @@ public class LightESP extends Module {
             }
         }
 
+        // Prioritize nearby chunks first so rendering catches up quickly while moving.
+        scanQueue.sort(Comparator.comparingInt(pos -> {
+            int dx = pos.x - playerChunkPos.x;
+            int dz = pos.z - playerChunkPos.z;
+            return dx * dx + dz * dz;
+        }));
+
         scanInProgress = !scanQueue.isEmpty();
     }
 
     private void processScanBatch() {
+        int dynamicChunksPerTick = chunksPerTick.get();
+        if (adaptiveMovementBoost.get() && lastMovementSpeed >= movementBoostThreshold.get()) {
+            dynamicChunksPerTick = Math.max(dynamicChunksPerTick, movementBoostChunksPerTick.get());
+        }
+
         int processed = 0;
-        while (processed < chunksPerTick.get() && scanIndex < scanQueue.size()) {
+        while (processed < dynamicChunksPerTick && scanIndex < scanQueue.size()) {
             ChunkPos pos = scanQueue.get(scanIndex++);
             Chunk chunk = mc.world.getChunk(pos.x, pos.z);
             if (chunk != null && chunk.getStatus().isAtLeast(ChunkStatus.FULL)) {
@@ -411,6 +478,18 @@ public class LightESP extends Module {
             event.renderer.box(pos, sColor, lColor, shapeMode.get(), 0);
             rendered++;
         }
+    }
+
+    private void updateMovementSpeed() {
+        Vec3d currentPos = new Vec3d(mc.player.getX(), mc.player.getY(), mc.player.getZ());
+        if (lastPlayerPos == null) {
+            lastPlayerPos = currentPos;
+            lastMovementSpeed = 0.0;
+            return;
+        }
+
+        lastMovementSpeed = currentPos.distanceTo(lastPlayerPos);
+        lastPlayerPos = currentPos;
     }
 
     private float[] getThermalColor(int lightLevel) {
