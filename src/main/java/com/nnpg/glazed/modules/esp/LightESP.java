@@ -2,7 +2,6 @@ package com.nnpg.glazed.modules.esp;
 
 import com.nnpg.glazed.GlazedAddon;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
-import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
@@ -25,7 +24,6 @@ public class LightESP extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
     private final SettingGroup sgFilter = settings.createGroup("Filters");
     private final SettingGroup sgRender = settings.createGroup("Render");
-    private final SettingGroup sgPerformance = settings.createGroup("Performance");
 
     private final Setting<Integer> chunkRadius = sgGeneral.add(new IntSetting.Builder()
         .name("chunk-radius")
@@ -136,36 +134,6 @@ public class LightESP extends Module {
         .build()
     );
 
-    private final Setting<Integer> scanIntervalMs = sgPerformance.add(new IntSetting.Builder()
-        .name("scan-interval-ms")
-        .description("Delay between full rescan cycles.")
-        .defaultValue(1200)
-        .min(200)
-        .max(5000)
-        .sliderMax(5000)
-        .build()
-    );
-
-    private final Setting<Integer> chunksPerTick = sgPerformance.add(new IntSetting.Builder()
-        .name("chunks-per-tick")
-        .description("How many chunks are scanned each tick.")
-        .defaultValue(2)
-        .min(1)
-        .max(16)
-        .sliderMax(16)
-        .build()
-    );
-
-    private final Setting<Integer> maxRenderedLights = sgPerformance.add(new IntSetting.Builder()
-        .name("max-rendered-lights")
-        .description("Maximum number of light markers rendered each frame.")
-        .defaultValue(600)
-        .min(50)
-        .max(3000)
-        .sliderMax(3000)
-        .build()
-    );
-
     private final Setting<Boolean> thermalColors = sgRender.add(new BoolSetting.Builder()
         .name("thermal-colors")
         .description("Use thermal-style colors based on light level.")
@@ -190,11 +158,8 @@ public class LightESP extends Module {
     );
 
     private final Map<BlockPos, Integer> lightCache = new ConcurrentHashMap<>();
-    private final List<ChunkPos> scanQueue = new ArrayList<>();
-    private final Map<BlockPos, Integer> stagingCache = new HashMap<>();
-    private int scanIndex = 0;
-    private boolean scanInProgress = false;
     private long lastScanTime = 0;
+    private static final long SCAN_INTERVAL = 500; // Scan every 500ms
 
     public LightESP() {
         super(GlazedAddon.esp, "light-esp", "Improved light source detection");
@@ -203,104 +168,58 @@ public class LightESP extends Module {
     @Override
     public void onActivate() {
         lightCache.clear();
-        scanQueue.clear();
-        stagingCache.clear();
-        scanIndex = 0;
-        scanInProgress = false;
         lastScanTime = 0;
     }
 
     @Override
     public void onDeactivate() {
         lightCache.clear();
-        scanQueue.clear();
-        stagingCache.clear();
-        scanInProgress = false;
-    }
-
-    @EventHandler
-    private void onTick(TickEvent.Pre event) {
-        if (mc.world == null || mc.player == null) return;
-
-        long currentTime = System.currentTimeMillis();
-        if (!scanInProgress && currentTime - lastScanTime >= scanIntervalMs.get()) {
-            prepareScan();
-            lastScanTime = currentTime;
-        }
-
-        if (scanInProgress) {
-            processScanBatch();
-        }
     }
 
     @EventHandler
     private void onRender3D(Render3DEvent event) {
         if (mc.world == null || mc.player == null) return;
 
+        long currentTime = System.currentTimeMillis();
+        if (currentTime - lastScanTime >= SCAN_INTERVAL) {
+            scanForLights();
+            lastScanTime = currentTime;
+        }
+
         renderCachedLights(event);
     }
 
-    private void prepareScan() {
-        ChunkPos playerChunkPos = mc.player.getChunkPos();
-        int radius = chunkRadius.get();
+    private void scanForLights() {
+        if (mc.world == null || mc.player == null) return;
 
-        scanQueue.clear();
-        stagingCache.clear();
-        scanIndex = 0;
+        ChunkPos playerChunkPos = mc.player.getChunkPos();
+        Map<BlockPos, Integer> newCache = new HashMap<>();
+        int radius = chunkRadius.get();
 
         for (int chunkX = playerChunkPos.x - radius; chunkX <= playerChunkPos.x + radius; chunkX++) {
             for (int chunkZ = playerChunkPos.z - radius; chunkZ <= playerChunkPos.z + radius; chunkZ++) {
-                scanQueue.add(new ChunkPos(chunkX, chunkZ));
+                Chunk chunk = mc.world.getChunk(chunkX, chunkZ);
+                if (chunk != null && chunk.getStatus().isAtLeast(ChunkStatus.FULL)) {
+                    scanChunk(chunkX, chunkZ, newCache);
+                }
             }
         }
 
-        scanInProgress = !scanQueue.isEmpty();
-    }
-
-    private void processScanBatch() {
-        int processed = 0;
-        while (processed < chunksPerTick.get() && scanIndex < scanQueue.size()) {
-            ChunkPos pos = scanQueue.get(scanIndex++);
-            Chunk chunk = mc.world.getChunk(pos.x, pos.z);
-            if (chunk != null && chunk.getStatus().isAtLeast(ChunkStatus.FULL)) {
-                scanChunk(pos.x, pos.z, stagingCache);
-            }
-            processed++;
-        }
-
-        if (scanIndex >= scanQueue.size()) {
-            lightCache.clear();
-            lightCache.putAll(stagingCache);
-            stagingCache.clear();
-            scanQueue.clear();
-            scanInProgress = false;
-        }
+        lightCache.clear();
+        lightCache.putAll(newCache);
     }
 
     private void scanChunk(int chunkX, int chunkZ, Map<BlockPos, Integer> cache) {
         int startX = chunkX * 16;
         int startZ = chunkZ * 16;
-        int maxDistSq = maxDistance.get() * maxDistance.get();
-        BlockPos.Mutable pos = new BlockPos.Mutable();
 
         for (int x = 0; x < 16; x++) {
             for (int z = 0; z < 16; z++) {
                 for (int y = minY.get(); y <= maxY.get(); y++) {
-                    pos.set(startX + x, y, startZ + z);
+                    BlockPos pos = new BlockPos(startX + x, y, startZ + z);
 
                     // Distance check
-                    if (distanceLimit.get() && mc.player.squaredDistanceTo(pos.getX(), pos.getY(), pos.getZ()) > maxDistSq) {
-                        continue;
-                    }
-
-                    BlockState state = mc.world.getBlockState(pos);
-                    Block block = state.getBlock();
-
-                    if (onlySourceBlocks.get()) {
-                        int luminance = state.getLuminance();
-                        if (luminance < minLightLevel.get()) continue;
-                        if (!passesFilters(block)) continue;
-                        cache.put(pos.toImmutable(), luminance);
+                    if (distanceLimit.get() && mc.player.squaredDistanceTo(pos.getX(), pos.getY(), pos.getZ()) > maxDistance.get() * maxDistance.get()) {
                         continue;
                     }
 
@@ -309,16 +228,32 @@ public class LightESP extends Module {
 
                     // Must have sufficient block light and more block light than sky light
                     if (blockLight >= minLightLevel.get() && blockLight > skyLight) {
+                        BlockState state = mc.world.getBlockState(pos);
+                        Block block = state.getBlock();
+
+                        // If only source blocks, check if this is actually emitting light
+                        if (onlySourceBlocks.get()) {
+                            if (!isLightSourceBlock(block, state)) {
+                                continue;
+                            }
+                        }
+
                         // Apply filters
                         if (!passesFilters(block)) {
                             continue;
                         }
 
-                        cache.put(pos.toImmutable(), blockLight);
+                        cache.put(pos, blockLight);
                     }
                 }
             }
         }
+    }
+
+    private boolean isLightSourceBlock(Block block, BlockState state) {
+        // Get the luminance directly from the block
+        int luminance = state.getLuminance();
+        return luminance > 0;
     }
 
     private boolean passesFilters(Block block) {
@@ -374,19 +309,9 @@ public class LightESP extends Module {
     }
 
     private void renderCachedLights(Render3DEvent event) {
-        int rendered = 0;
-        int maxRender = maxRenderedLights.get();
-        int maxDistSq = maxDistance.get() * maxDistance.get();
-
         for (Map.Entry<BlockPos, Integer> entry : lightCache.entrySet()) {
-            if (rendered >= maxRender) break;
-
             BlockPos pos = entry.getKey();
             int lightLevel = entry.getValue();
-
-            if (distanceLimit.get() && mc.player.squaredDistanceTo(pos.getX(), pos.getY(), pos.getZ()) > maxDistSq) {
-                continue;
-            }
 
             SettingColor sColor, lColor;
             if (thermalColors.get()) {
@@ -409,7 +334,6 @@ public class LightESP extends Module {
             }
 
             event.renderer.box(pos, sColor, lColor, shapeMode.get(), 0);
-            rendered++;
         }
     }
 
